@@ -1,72 +1,59 @@
 import pandas as pd
 import FinanceDataReader as fdr
 import requests
-from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import warnings
 import json
-import numpy as np
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings('ignore')
 
-# ✅ 디스코드 웹후크 URL
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1474739516177911979/IlrMnj_UABCGYJiVg9NcPpSVT2HoT9aMNpTsVyJzCK3yS9LQH9E0WgbYB99FHVS2SUWT"
 
-def get_investor_data_3days(ticker_code):
-    """네이버 금융에서 최근 3거래일 외국인/기관 순매수 합계 가져오기"""
+def get_investor_data_fdr(ticker, end_date):
+    """fdr을 사용하여 최근 3거래일 수급 데이터 추출 (네이버 스크래핑 대체)"""
     try:
-        url = f"https://finance.naver.com/item/frgn.naver?code={ticker_code}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(res.text, 'html.parser')
+        # 최근 10일치 데이터를 넉넉히 가져옴 (주말/공휴일 고려)
+        start_date = (end_date - timedelta(days=10)).strftime('%Y-%m-%d')
+        # fdr의 'STOCK_INVESTOR' 기능을 활용 (안정성 최상)
+        df_inv = fdr.DataReader(ticker, start_date, end_date.strftime('%Y-%m-%d'), data_source='stock_investor')
         
-        table = soup.find('table', {'class': 'type2'})
-        rows = table.find_all('tr', {'onmouseover': 'mouseOver(this)'})
-        
-        if len(rows) < 3: return "0/0", False
-        
-        frgn_sum = 0
-        inst_sum = 0
-        consecutive_buy = True # 3일 연속 매수 여부 체크
-        
-        for i in range(3): # 최근 3일 데이터 순회
-            cols = rows[i].find_all('td')
-            inst_val = int(cols[5].get_text(strip=True).replace(',', ''))
-            frgn_val = int(cols[6].get_text(strip=True).replace(',', ''))
+        if df_inv is None or len(df_inv) < 3:
+            return "0/0", False
             
-            frgn_sum += frgn_val
-            inst_sum += inst_val
-            
-            # 둘 다 마이너스면 연속 매수 실패로 간주 (개별 전략에 따라 수정 가능)
-            if frgn_val <= 0 and inst_val <= 0:
-                consecutive_buy = False
-
+        # 최근 3일치 합계 (외국인: 'ForeignNet', 기관: 'InstitutionalNet')
+        recent_3 = df_inv.tail(3)
+        frgn_sum = int(recent_3['ForeignNet'].sum())
+        inst_sum = int(recent_3['InstitutionalNet'].sum())
+        
         def format_val(val):
             return f"+{val}" if val > 0 else str(val)
-
-        status_text = f"외인{format_val(frgn_sum)} / 기관{format_val(inst_sum)}"
-        return status_text, (frgn_sum > 0 or inst_sum > 0)
+            
+        is_hot = (frgn_sum > 0 or inst_sum > 0)
+        return f"외인{format_val(frgn_sum)} / 기관{format_val(inst_sum)}", is_hot
     except:
         return "데이터미비", False
 
 def is_recent_operating_profit_positive(ticker_code):
-    """최신 공시 기준 영업이익 흑자 확인"""
+    """영업이익 흑자 확인 (안정적인 테이블 구조 사용)"""
     try:
         url = f"https://finance.naver.com/item/main.naver?code={ticker_code}"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         tables = pd.read_html(res.text, encoding='euc-kr')
-        finance_table = tables[3]
-        finance_table.columns = ['_'.join(str(c) for c in col).strip() for col in finance_table.columns]
-        op_row = finance_table[finance_table.iloc[:, 0].str.contains('영업이익', na=False)]
-        return pd.to_numeric(op_row.iloc[0, -4:], errors='coerce').dropna().iloc[-1] > 0
+        # 종목마다 테이블 위치가 다를 수 있어 '영업이익' 글자로 검색
+        for df in tables:
+            if any('영업이익' in str(row) for row in df.iloc[:,0]):
+                val = pd.to_numeric(df.iloc[0, -4:], errors='coerce').dropna()
+                return val.iloc[-1] > 0
+        return False
     except: return False
 
 def analyze_stock(args):
-    ticker, name, start_date, end_date = args
+    ticker, name, end_date = args
+    start_date_price = end_date - timedelta(days=60)
     try:
-        df = fdr.DataReader(ticker, start_date, end_date)
+        df = fdr.DataReader(ticker, start_date_price, end_date)
         if len(df) < 30: return None
         
         df['Val'] = df['Close'] * df['Volume']
@@ -85,9 +72,9 @@ def analyze_stock(args):
         if val_median < 1500000000: return None                  
         if (df['Val'].tail(20) >= 1000000000).sum() < 15: return None 
 
-        # [흑자 확인 및 3일 수급 데이터 가져오기]
         if is_recent_operating_profit_positive(ticker):
-            supply_info, is_hot = get_investor_data_3days(ticker)
+            # ✅ 수급 데이터 소스 변경: fdr을 통한 직접 데이터 요청
+            supply_info, is_hot = get_investor_data_fdr(ticker, end_date)
             return {
                 'Name': name, 'Code': ticker, 'Ratio': round(vol_ratio, 1), 
                 'MedianVal': round(val_median / 100000000, 1), 
@@ -99,32 +86,14 @@ def analyze_stock(args):
 
 def main():
     start_time = time.time()
-    print(f"🚀 [폭풍전야 + 3일 수급] 분석 시작...")
+    print(f"🚀 [수급 소스 교체 완료] 정밀 분석 시작...")
     
     krx_df = fdr.StockListing('KRX')
     krx_df = krx_df[krx_df['Code'].str.match(r'^\d{5}0$')]
     ticker_dict = dict(zip(krx_df['Code'], krx_df['Name']))
     
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=60)
     
-    tasks = [(t, n, start_date, end_date) for t, n in ticker_dict.items()]
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(analyze_stock, tasks))
-    
-    final_picks = sorted([r for r in results if r is not None], key=lambda x: x['Ratio'])[:30]
-    
-    if not final_picks:
-        msg = f"📅 {end_date.strftime('%Y-%m-%d')} | 조건을 만족하는 종목이 없습니다."
-    else:
-        msg = f"🌪️ **[폭풍전야: 3일 수급 응축 TOP {len(final_picks)}]**\n"
-        msg += "*(흑자+20일선 위+거래 급감+중간값 15억↑+3일 수급합산)*\n\n"
-        for p in final_picks:
-            star = "⭐" if p['IsHot'] else ""
-            msg += f"• {star}**{p['Name']}**({p['Code']}) | `{p['Ratio']}%` | `{p['MedianVal']}억` | `{p['Return']}%` | `[{p['Supply']}]` \n"
-
-    requests.post(DISCORD_WEBHOOK_URL, data=json.dumps({"content": msg}), headers={'Content-Type': 'application/json'})
-    print(f"✅ 분석 완료! ({int(time.time() - start_time)}초)")
-
-if __name__ == "__main__":
-    main()
+    # 병렬 처리
+    tasks = [(t, n, end_date) for t, n in ticker_dict.items()]
+    with ThreadPoolExecutor(max_workers=8
