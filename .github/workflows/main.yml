@@ -25,4 +25,4 @@ jobs:
         pip install pykrx pandas requests
 
     - name: 주도주 탐색 파이썬 스크립트 실행
-      run: python start.py
+      run: python start2.py
