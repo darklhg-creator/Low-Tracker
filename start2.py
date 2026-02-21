@@ -11,25 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings('ignore')
 
-# ✅ 디스코드 웹후크 URL
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1474739516177911979/IlrMnj_UABCGYJiVg9NcPpSVT2HoT9aMNpTsVyJzCK3yS9LQH9E0WgbYB99FHVS2SUWT"
 
-def get_indicators(df):
-    """RSI, OBV, MA, 이격도, 전고점 계산"""
-    delta = df['Close'].diff()
-    up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
-    ema_up = up.ewm(com=13, adjust=False).mean()
-    ema_down = down.ewm(com=13, adjust=False).mean()
-    df['RSI'] = 100 - (100 / (1 + ema_up / ema_down))
-    df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-    df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['MA60'] = df['Close'].rolling(window=60).mean()
-    df['Disparity'] = (df['Close'] / df['MA20']) * 100
-    df['High60'] = df['High'].rolling(window=60).max()
-    return df
-
 def is_recent_operating_profit_positive(ticker_code):
-    """네이버 금융 최신 공시 기준 영업이익 흑자 확인"""
+    """실시간 영업이익 흑자 확인"""
     try:
         url = f"https://finance.naver.com/item/main.naver?code={ticker_code}"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
@@ -37,73 +22,79 @@ def is_recent_operating_profit_positive(ticker_code):
         finance_table = tables[3]
         finance_table.columns = ['_'.join(str(c) for c in col).strip() for col in finance_table.columns]
         op_row = finance_table[finance_table.iloc[:, 0].str.contains('영업이익', na=False)]
-        recent_values = pd.to_numeric(op_row.iloc[0, -4:], errors='coerce').dropna()
-        return recent_values.iloc[-1] > 0
+        return pd.to_numeric(op_row.iloc[0, -4:], errors='coerce').dropna().iloc[-1] > 0
     except: return False
 
 def analyze_stock(args):
-    """개별 종목 정밀 분석"""
     ticker, name, start_date, end_date = args
     try:
         df = fdr.DataReader(ticker, start_date, end_date)
-        if len(df) < 70: return None
+        if len(df) < 30: return None
         
-        df = get_indicators(df)
-        curr = df.iloc[-1]; prev = df.iloc[-4]
+        # 지표 계산
+        df['Val'] = df['Close'] * df['Volume']  # 일일 거래대금
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['MA20_Vol'] = df['Volume'].rolling(window=20).mean()
         
-        # [검증 1] 20일선 우상향 & 20>60 정배열 유지
-        if not (curr['MA20'] > prev['MA20'] and curr['MA20'] > curr['MA60']): return None
-        
-        # [검증 2] 거래대금 중간값 기준 완화 (30억 -> 15억)
-        df['Val'] = df['Close'] * df['Volume']
-        if df['Val'].rolling(window=20).median().iloc[-1] < 1500000000: return None
-        
-        # [검증 3] OBV 에너지 상승 유지
-        if curr['OBV'] <= df['OBV'].iloc[-5]: return None
-        
-        # [검증 4] 전고점 대비 10% 이내 & 이격도 안정(105이하)
-        dist_from_high = (curr['High60'] - curr['Close']) / curr['High60']
-        if not (dist_from_high < 0.10 and curr['Disparity'] < 105): return None
-        
-        # [검증 5] 눌림목 범위 완화 (RSI 45 -> 50)
-        if curr['RSI'] > 50: return None
+        curr = df.iloc[-1]
+        vol_ratio = (curr['Volume'] / curr['MA20_Vol']) * 100
+        day_return = (curr['Close'] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]
 
-        # [최종] 영업이익 흑자 확인
+        # ---------------------------------------------------------
+        # 🛡️ [유동성 함정 탈출 필터 - 수정된 부분]
+        # ---------------------------------------------------------
+        # 방안 1: 거래대금 중간값 15억 이상 (단기 펌핑 무시)
+        val_median = df['Val'].tail(20).median()
+        if val_median < 1500000000: return None
+        
+        # 방안 2: 최근 20일 중 거래대금 10억 이상인 날이 15일 이상 (꾸준함 검증)
+        steady_days = (df['Val'].tail(20) >= 1000000000).sum()
+        if steady_days < 15: return None
+        # ---------------------------------------------------------
+
+        # [기존 폭풍전야 조건]
+        if curr['Close'] < curr['MA20']: return None # 20일선 위
+        if abs(day_return) > 0.03: return None      # 변동성 3% 이내
+        if vol_ratio > 35: return None               # 거래량 35% 이하 급감
+
         if is_recent_operating_profit_positive(ticker):
             return {
-                'Name': name, 'Code': ticker, 'RSI': round(curr['RSI'], 1), 
-                '이격도': round(curr['Disparity'], 1), '전고점차': f"{round(dist_from_high*100, 1)}%"
+                'Name': name, 'Code': ticker, 'Ratio': round(vol_ratio, 1), 
+                'MedianVal': round(val_median / 100000000, 1), 
+                'Return': round(day_return * 100, 2)
             }
     except: return None
 
 def main():
     start_time = time.time()
-    print(f"🚀 병렬 분석 엔진 가동... (수정된 문턱 적용)")
+    print(f"🚀 [유동성 정밀 필터링] 폭풍전야 분석 시작...")
     
     krx_df = fdr.StockListing('KRX')
     krx_df = krx_df[krx_df['Code'].str.match(r'^\d{5}0$')]
     ticker_dict = dict(zip(krx_df['Code'], krx_df['Name']))
     
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=150)
+    start_date = end_date - timedelta(days=60)
     
     tasks = [(t, n, start_date, end_date) for t, n in ticker_dict.items()]
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=12) as executor:
         results = list(executor.map(analyze_stock, tasks))
     
-    final_picks = [r for r in results if r is not None]
+    final_picks = sorted([r for r in results if r is not None], key=lambda x: x['Ratio'])[:30]
     
-    # 디스코드 메시지 구성
     if not final_picks:
-        msg = f"📅 {end_date.strftime('%Y-%m-%d')} | 완화된 조건으로도 검색된 종목이 없습니다."
+        msg = f"📅 {end_date.strftime('%Y-%m-%d')} | 정밀 유동성 조건을 만족하는 종목이 없습니다."
     else:
-        msg = f"💎 **{end_date.strftime('%Y-%m-%d')} 수정된 정예 종목** 💎\n"
-        msg += "*(RSI 50↓ / 거래대금 중간값 15억↑ / 정배열 / 흑자)*\n\n"
+        msg = f"🌪️ **[폭풍전야: 정밀 유동성 TOP {len(final_picks)}]**\n"
+        msg += "*(조건: 흑자+20일선 위+거래 급감+중간값 15억↑+유지 15일↑)*\n"
+        msg += "```"
+        msg += f"{'종목명':<10} {'거래비율(%)':<10} {'중간대금(억)':<10} {'오늘등락(%)':<10}\n"
         for p in final_picks:
-            msg += f"• **{p['Name']}**({p['Code']}) | RSI: `{p['RSI']}` | 이격도: `{p['이격도']}` | 전고점차: `{p['전고점차']}`\n"
+            msg += f"{p['Name']:<10} {p['Ratio']:>12.1f} {p['MedianVal']:>12.1f} {p['Return']:>13.2f}\n"
+        msg += "```"
 
     requests.post(DISCORD_WEBHOOK_URL, data=json.dumps({"content": msg}), headers={'Content-Type': 'application/json'})
-    print(f"✅ 분석 완료! 소요시간: {int(time.time() - start_time)}초")
+    print(f"✅ 분석 완료! ({int(time.time() - start_time)}초)")
 
 if __name__ == "__main__":
     main()
