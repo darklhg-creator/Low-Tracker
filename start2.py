@@ -1,6 +1,7 @@
 import pandas as pd
 import FinanceDataReader as fdr
 import requests
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import warnings
 import json
@@ -9,33 +10,44 @@ from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings('ignore')
 
-# ✅ 디스코드 웹후크 URL
+# ✅ 사용자 디스코드 웹후크
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1474739516177911979/IlrMnj_UABCGYJiVg9NcPpSVT2HoT9aMNpTsVyJzCK3yS9LQH9E0WgbYB99FHVS2SUWT"
 
-def get_investor_data_fdr(ticker, end_date):
-    """fdr을 사용하여 최근 3거래일 수급 데이터 추출"""
+def get_investor_data_stable(ticker):
+    """네이버 금융 PC 버전 테이블에서 수급 데이터를 추출 (안정성 강화)"""
     try:
-        # 주말/공휴일을 고려하여 최근 10일치 데이터를 가져와서 그중 마지막 3일 사용
-        start_date_str = (end_date - timedelta(days=10)).strftime('%Y-%m-%d')
-        end_date_str = end_date.strftime('%Y-%m-%d')
+        url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        res = requests.get(url, headers=headers, timeout=7)
         
-        # fdr의 'STOCK_INVESTOR' 데이터 소스 활용
-        df_inv = fdr.DataReader(ticker, start_date_str, end_date_str, data_source='stock_investor')
+        # pandas read_html을 사용하여 테이블을 직접 파싱
+        tables = pd.read_html(res.text, encoding='euc-kr')
+        # 수급 데이터가 담긴 테이블(보통 2번째 혹은 3번째) 탐색
+        df_inv = None
+        for t in tables:
+            if '기관' in t.columns and '외국인' in t.columns:
+                df_inv = t
+                break
         
-        if df_inv is None or len(df_inv) < 3:
-            return "0/0", False
-            
-        recent_3 = df_inv.tail(3)
-        frgn_sum = int(recent_3['ForeignNet'].sum())
-        inst_sum = int(recent_3['InstitutionalNet'].sum())
+        if df_inv is None: return "0/0", False
+
+        # 불필요한 행 제거 및 최근 3일 데이터 확보
+        df_inv = df_inv.dropna(subset=['기관', '외국인']).head(3)
+        
+        def clean_val(val):
+            if isinstance(val, str):
+                val = val.replace(',', '').replace('+', '')
+            return int(float(val))
+
+        inst_sum = df_inv['기관'].apply(clean_val).sum()
+        frgn_sum = df_inv['외국인'].apply(clean_val).sum()
         
         def format_val(val):
             return f"+{val}" if val > 0 else str(val)
             
-        # 외인이나 기관 중 한쪽이라도 3일 합계가 양수면 True
         is_hot = (frgn_sum > 0 or inst_sum > 0)
         return f"외인{format_val(frgn_sum)} / 기관{format_val(inst_sum)}", is_hot
-    except:
+    except Exception as e:
         return "데이터미비", False
 
 def is_recent_operating_profit_positive(ticker_code):
@@ -45,6 +57,7 @@ def is_recent_operating_profit_positive(ticker_code):
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         tables = pd.read_html(res.text, encoding='euc-kr')
         for df in tables:
+            df.columns = [str(c) for c in df.columns]
             if any('영업이익' in str(row) for row in df.iloc[:,0]):
                 val = pd.to_numeric(df.iloc[0, -4:], errors='coerce').dropna()
                 return val.iloc[-1] > 0
@@ -75,7 +88,8 @@ def analyze_stock(args):
         if (df['Val'].tail(20) >= 1000000000).sum() < 15: return None 
 
         if is_recent_operating_profit_positive(ticker):
-            supply_info, is_hot = get_investor_data_fdr(ticker, end_date)
+            # 수급 데이터 추출
+            supply_info, is_hot = get_investor_data_stable(ticker)
             return {
                 'Name': name, 'Code': ticker, 'Ratio': round(vol_ratio, 1), 
                 'MedianVal': round(val_median / 100000000, 1), 
@@ -87,21 +101,17 @@ def analyze_stock(args):
 
 def main():
     start_time = time.time()
-    print(f"🚀 [폭풍전야] 수급 데이터 정밀 분석 시작...")
+    print(f"🚀 [폭풍전야] 최종 안정화 엔진 가동...")
     
-    try:
-        krx_df = fdr.StockListing('KRX')
-        krx_df = krx_df[krx_df['Code'].str.match(r'^\d{5}0$')]
-        ticker_dict = dict(zip(krx_df['Code'], krx_df['Name']))
-    except Exception as e:
-        print(f"목록 로드 실패: {e}")
-        return
+    krx_df = fdr.StockListing('KRX')
+    krx_df = krx_df[krx_df['Code'].str.match(r'^\d{5}0$')]
+    ticker_dict = dict(zip(krx_df['Code'], krx_df['Name']))
 
     end_date = datetime.today()
     
-    # 병렬 처리 (괄호 오타 수정 완료)
     tasks = [(t, n, end_date) for t, n in ticker_dict.items()]
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    # max_workers를 5로 제한하여 네이버의 IP 차단을 방지합니다.
+    with ThreadPoolExecutor(max_workers=5) as executor:
         results = list(executor.map(analyze_stock, tasks))
     
     final_picks = sorted([r for r in results if r is not None], key=lambda x: x['Ratio'])[:30]
@@ -110,7 +120,7 @@ def main():
         msg = f"📅 {end_date.strftime('%Y-%m-%d')} | 만족하는 종목이 없습니다."
     else:
         msg = f"🌪️ **[폭풍전야: 3일 수급 응축 TOP {len(final_picks)}]**\n"
-        msg += "*(조건: 흑자+20일선 위+거래 급감+중간값 15억↑+3일 수급합산)*\n\n"
+        msg += "*(수정: 안정적 데이터 추출 및 흑자 조건 강화)*\n\n"
         for p in final_picks:
             star = "⭐" if p['IsHot'] else ""
             msg += f"• {star}**{p['Name']}**({p['Code']}) | `{p['Ratio']}%` | `{p['MedianVal']}억` | `{p['Return']}%` | `[{p['Supply']}]` \n"
