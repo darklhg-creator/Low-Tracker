@@ -10,18 +10,17 @@ from urllib.parse import unquote
 
 warnings.filterwarnings('ignore')
 
-# ✅ [필독] 마이페이지의 'Decoding' 인증키를 아래 따옴표 안에 정확히 넣으세요
+# ✅ [체크] 1. 마이페이지의 'Decoding' 인증키를 넣으세요
 RAW_KEY = "62e0d95b35661ef8e1f9a665ef46cc7cd64a3ace4d179612dda40c847f6bdb7e"
 PUBLIC_API_KEY = unquote(RAW_KEY) 
 
+# ✅ [체크] 2. 본인의 디스코드 웹훅 주소가 맞는지 확인하세요
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1474739516177911979/IlrMnj_UABCGYJiVg9NcPpSVT2HoT9aMNpTsVyJzCK3yS9LQH9E0WgbYB99FHVS2SUWT"
 
 def get_investor_data_public(ticker_name):
-    """공공데이터 API 정밀 진단 버전"""
+    """공공데이터 API: 최근 3일 수급 추출"""
     try:
         url = "http://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getInvestorRegistrationStat"
-        
-        # 주말 고려 10일치 조회
         today = datetime.now()
         start_dt = (today - timedelta(days=10)).strftime('%Y%m%d')
         
@@ -33,28 +32,20 @@ def get_investor_data_public(ticker_name):
             'numOfRows': '10'
         }
         
-        # 타임아웃을 20초로 늘려 서버 응답을 더 기다립니다.
         res = requests.get(url, params=params, timeout=20)
         
-        # 1. 인증키 미등록 에러 체크 (시간이 필요한 경우)
+        # 상세 에러 메시지 분석
         if "SERVICE_KEY_IS_NOT_REGISTERED_ERROR" in res.text:
-            return "키활성화대기(시간필요)", False
-        
-        # 2. 결과가 XML(에러)인 경우
+            return "키활성화대기", False
         if res.text.startswith("<"):
-            return "API점검중", False
+            return "API점검", False
             
         data = res.json()
-        
-        # 3. 데이터가 없는 경우
         if 'item' not in data['response']['body']['items']:
-            return "데이터없음", False
+            return "업데이트전", False
             
         items = data['response']['body']['items']['item']
-        if not items: return "데이터비었음", False
-        
-        # 최신순 정렬 후 최근 3거래일 수급 합산
-        if isinstance(items, dict): items = [items] # 데이터가 1개일 경우 처리
+        if isinstance(items, dict): items = [items]
         items = sorted(items, key=lambda x: x['basDt'], reverse=True)
         
         inst_sum, frgn_sum = 0, 0
@@ -63,18 +54,16 @@ def get_investor_data_public(ticker_name):
             frgn_sum += int(items[i]['frgnPurNetQty'])
             
         def format_val(val):
-            if abs(val) >= 10000:
-                return f"{'+' if val > 0 else ''}{round(val/10000, 1)}만"
+            if abs(val) >= 10000: return f"{'+' if val > 0 else ''}{round(val/10000, 1)}만"
             return f"{'+' if val > 0 else ''}{val}"
             
         is_hot = (frgn_sum > 0 or inst_sum > 0)
         return f"외인{format_val(frgn_sum)} / 기관{format_val(inst_sum)}", is_hot
-    except Exception as e:
-        # 어떤 종류의 에러인지 구체적으로 표시
-        return f"연결확인중({type(e).__name__})", False
+    except:
+        return "조회지연", False
 
 def is_recent_operating_profit_positive(ticker_code):
-    """최신 공시 기준 영업이익 흑자 확인"""
+    """최신 공시 영업이익 흑자 확인"""
     try:
         url = f"https://finance.naver.com/item/main.naver?code={ticker_code}"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
@@ -102,7 +91,6 @@ def analyze_stock(args):
         day_return = (curr['Close'] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]
         val_median = df['Val'].tail(20).median()
 
-        # [필터 조건]
         if curr['Close'] < df['MA20_Price'].iloc[-1]: return None  
         if abs(day_return) > 0.03: return None                   
         if vol_ratio > 35: return None                            
@@ -115,29 +103,25 @@ def analyze_stock(args):
                 'Name': name, 'Code': ticker, 'Ratio': round(vol_ratio, 1), 
                 'MedianVal': round(val_median / 100000000, 1), 
                 'Return': round(day_return * 100, 2),
-                'Supply': supply_info,
-                'IsHot': is_hot
+                'Supply': supply_info, 'IsHot': is_hot
             }
     except: return None
 
 def main():
-    start_time = time.time()
-    print(f"🚀 [폭풍전야] 공공데이터 정밀 진단 엔진 가동...")
-    
+    print(f"🚀 [폭풍전야] 분석 시작...")
     krx_df = fdr.StockListing('KRX')
     krx_df = krx_df[krx_df['Code'].str.match(r'^\d{5}0$')]
     ticker_dict = dict(zip(krx_df['Code'], krx_df['Name']))
     end_date = datetime.today()
     
     tasks = [(t, n, end_date) for t, n in ticker_dict.items()]
-    # API 안정성을 위해 워커를 5개로 유지
     with ThreadPoolExecutor(max_workers=5) as executor:
         results = list(executor.map(analyze_stock, tasks))
     
     final_picks = sorted([r for r in results if r is not None], key=lambda x: x['Ratio'])[:30]
     
     if not final_picks:
-        msg = f"📅 {end_date.strftime('%Y-%m-%d')} | 조건을 만족하는 종목이 없습니다."
+        msg = f"📅 {end_date.strftime('%Y-%m-%d')} | 조건 만족 종목 없음"
     else:
         msg = f"🌪️ **[폭풍전야: 3일 수급 응축 TOP {len(final_picks)}]**\n"
         msg += "*(로직: 흑자+20일선 위+거래 급감+중간값 15억↑+공공데이터)*\n\n"
@@ -145,8 +129,17 @@ def main():
             star = "⭐" if p['IsHot'] else ""
             msg += f"• {star}**{p['Name']}**({p['Code']}) | `{p['Ratio']}%` | `{p['MedianVal']}억` | `{p['Return']}%` | `[{p['Supply']}]` \n"
 
-    requests.post(DISCORD_WEBHOOK_URL, data=json.dumps({"content": msg}), headers={'Content-Type': 'application/json'})
-    print(f"✅ 분석 완료! ({int(time.time() - start_time)}초)")
+    # ✅ 이 부분이 디스코드 전송 핵심 코드입니다!
+    try:
+        payload = {"content": msg}
+        headers = {'Content-Type': 'application/json'}
+        response = requests.post(DISCORD_WEBHOOK_URL, data=json.dumps(payload), headers=headers)
+        if response.status_code == 204:
+            print("✅ 디스코드 메시지 전송 성공!")
+        else:
+            print(f"❌ 디스코드 전송 실패: {response.status_code}")
+    except Exception as e:
+        print(f"❌ 디스코드 통신 오류: {e}")
 
 if __name__ == "__main__":
     main()
