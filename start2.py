@@ -21,7 +21,6 @@ def get_investor_data_public(ticker_name):
         url = "http://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getInvestorRegistrationStat"
         today = datetime.now()
         start_dt = (today - timedelta(days=10)).strftime('%Y%m%d')
-        
         params = {
             'serviceKey': PUBLIC_API_KEY,
             'resultType': 'json',
@@ -29,25 +28,18 @@ def get_investor_data_public(ticker_name):
             'beginBasDt': start_dt,
             'numOfRows': '10'
         }
-        
         res = requests.get(url, params=params, timeout=15)
-        if "SERVICE_KEY_IS_NOT_REGISTERED_ERROR" in res.text: return "키활성화대기", False
-        if res.text.startswith("<"): return "조회지연", False
-            
         data = res.json()
         items = data['response']['body']['items']['item']
         if isinstance(items, dict): items = [items]
         items = sorted(items, key=lambda x: x['basDt'], reverse=True)
-        
         inst_sum, frgn_sum = 0, 0
         for i in range(min(3, len(items))):
             inst_sum += int(items[i]['insttnPurNetQty'])
             frgn_sum += int(items[i]['frgnPurNetQty'])
-            
         def format_val(val):
             if abs(val) >= 10000: return f"{'+' if val > 0 else ''}{round(val/10000, 1)}만"
             return f"{'+' if val > 0 else ''}{val}"
-            
         is_hot = (frgn_sum > 0 or inst_sum > 0)
         return f"외인{format_val(frgn_sum)} / 기관{format_val(inst_sum)}", is_hot
     except: return "조회지연", False
@@ -67,30 +59,45 @@ def is_recent_operating_profit_positive(ticker_code):
     except: return False
 
 def analyze_stock(args):
-    """폭풍전야: 30개 종목을 찾아냈던 오리지널 필터"""
+    """폭풍전야: 3중 필터(일/주/월) 엔진"""
     ticker, name, end_date = args
     try:
-        df = fdr.DataReader(ticker, (end_date - timedelta(days=60)), end_date)
-        if len(df) < 30: return None
+        # 🚀 [데이터 로드] 월봉 MA20을 위해 600일치(약 2.5년) 로드
+        df = fdr.DataReader(ticker, (end_date - timedelta(days=600)), end_date)
+        if len(df) < 100: return None
         
+        # 1. 일봉(Daily) 지표 및 필터
         df['Val'] = df['Close'] * df['Volume']
-        df['MA20_Vol'] = df['Volume'].rolling(window=20).mean()
         df['MA20_Price'] = df['Close'].rolling(window=20).mean()
+        df['MA20_Vol'] = df['Volume'].rolling(window=20).mean()
         
         curr = df.iloc[-1]
         prev_close = df['Close'].iloc[-2]
-        
         vol_ratio = (curr['Volume'] / df['MA20_Vol'].iloc[-1]) * 100
         day_return = (curr['Close'] - prev_close) / prev_close
+        cum_return_5d = (curr['Close'] - df['Close'].iloc[-6]) / df['Close'].iloc[-6]
         val_median = df['Val'].tail(20).median()
         val_count_10b = (df['Val'].tail(20) >= 1000000000).sum()
 
-        # 🚀 [오리지널 5대 원칙 원복]
-        if curr['Close'] < df['MA20_Price'].iloc[-1]: return None  # 1. 20일선 위
-        if abs(day_return) > 0.03: return None                    # 2. 당일 등락률 안정
-        if vol_ratio > 35: return None                             # 3. 거래량 35% 이하 응축
-        if val_median < 1500000000: return None                    # 4. 거래대금 중간값 15억↑
-        if val_count_10b < 15: return None                          # 5. 거래대금 10억↑ 지속성
+        # 🌪️ [일봉 필터링]
+        if cum_return_5d > 0.10: return None                       # 최근 급등 제외
+        if curr['Close'] < df['MA20_Price'].iloc[-1]: return None  # 20일선 위
+        if abs(day_return) > 0.03: return None                     # 당일 안정성
+        if vol_ratio > 35: return None                             # 거래량 응축
+        if val_median < 1500000000: return None                    # 중간값 15억↑
+        if val_count_10b < 15: return None                         # 연속성
+
+        # 🚀 [추가: 중장기 추세 필터] 주봉/월봉 MA20 안착 여부 검증
+        # 주봉 $WMA20$
+        df_weekly = df['Close'].resample('W').last()
+        w_ma20 = df_weekly.rolling(window=20).mean().iloc[-1]
+        
+        # 월봉 $MMA20$
+        df_monthly = df['Close'].resample('M').last()
+        m_ma20 = df_monthly.rolling(window=20).mean().iloc[-1]
+
+        if curr['Close'] < w_ma20: return None                     # 주봉 추세 이탈 배제
+        if curr['Close'] < m_ma20: return None                     # 월봉 추세 이탈 배제
 
         if is_recent_operating_profit_positive(ticker):
             supply_info, is_hot = get_investor_data_public(name)
@@ -103,33 +110,31 @@ def analyze_stock(args):
     except: return None
 
 def main():
-    print(f"🚀 [폭풍전야] 오리지널 30선 엔진 가동...")
+    start_time = time.time()
+    print(f"🚀 [폭풍전야] 중장기 추세 강화형 엔진 가동...")
     krx_df = fdr.StockListing('KRX')
     krx_df = krx_df[krx_df['Code'].str.match(r'^\d{5}0$')]
     ticker_dict = dict(zip(krx_df['Code'], krx_df['Name']))
     end_date = datetime.today()
     
     tasks = [(t, n, end_date) for t, n in ticker_dict.items()]
+    # 병렬 처리를 통해 속도 최적화 (기존 5 -> 8로 상향)
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(analyze_stock, tasks))
     
     final_picks = sorted([r for r in results if r is not None], key=lambda x: x['Ratio'])[:30]
     
     if not final_picks:
-        msg = f"📅 {end_date.strftime('%Y-%m-%d')} | 조건을 만족하는 종목이 없습니다."
+        msg = f"📅 {end_date.strftime('%Y-%m-%d')} | 조건을 만족하는 종목 없음"
     else:
-        msg = f"🌪️ **[폭풍전야: 3일 수급 응축 TOP {len(final_picks)}]**\n"
-        msg += "*(로직: 흑자+20일선 위+거래 급감35%↓+중간값 15억↑+공공데이터)*\n\n"
+        msg = f"🌪️ **[폭풍전야: 중장기 추세 통합 TOP {len(final_picks)}]**\n"
+        msg += "*(로직: 흑자+20선위+거래급감+최근급등배제+주봉/월봉 상승추세)*\n\n"
         for p in final_picks:
             star = "⭐" if p['IsHot'] else ""
             msg += f"• {star}**{p['Name']}**({p['Code']}) | `{p['Ratio']}%` | `{p['MedianVal']}억` | `{p['Return']}%` | `[{p['Supply']}]` \n"
 
-    try:
-        headers = {'Content-Type': 'application/json'}
-        requests.post(DISCORD_WEBHOOK_URL, data=json.dumps({"content": msg}), headers=headers)
-        print("✅ 디스코드 메시지 전송 완료!")
-    except:
-        print("❌ 전송 실패")
+    requests.post(DISCORD_WEBHOOK_URL, data=json.dumps({"content": msg}), headers={'Content-Type': 'application/json'})
+    print(f"✅ 분석 및 전송 완료! (소요시간: {int(time.time() - start_time)}초)")
 
 if __name__ == "__main__":
     main()
