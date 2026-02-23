@@ -11,7 +11,7 @@ warnings.filterwarnings('ignore')
 # 1. 설정 부분 (디스코드 웹훅)
 # ---------------------------------------------------------
 # 본인의 깃허브 시크릿(Secrets)으로 웹훅을 관리하시거나, 아래 변수에 직접 입력해 주세요.
-DISCORD_WEBHOOK_URL = "여기에_디스코드_웹훅_주소를_입력하세요"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1474739516177911979/IlrMnj_UABCGYJiVg9NcPpSVT2HoT9aMNpTsVyJzCK3yS9LQH9E0WgbYB99FHVS2SUWT"
 
 def send_discord_message(content):
     if DISCORD_WEBHOOK_URL == "여기에_디스코드_웹훅_주소를_입력하세요":
