@@ -4,11 +4,11 @@ on:
   schedule:
     # 월~금(1-5), UTC 기준 08:00 = 한국 시간(KST) 17:00 (오후 5시)
     - cron: '0 8 * * 1-5' 
-  workflow_dispatch: # 👈 깃허브 페이지에서 수동으로 당장 실행해볼 수 있는 버튼 생성
+  workflow_dispatch: # 수동 실행 버튼
 
 jobs:
   run-tracker:
-    runs-on: ubuntu-latest # 깃허브가 제공하는 리눅스 서버 사용
+    runs-on: ubuntu-latest
 
     steps:
     - name: 저장소 코드 가져오기
@@ -17,13 +17,13 @@ jobs:
     - name: 파이썬 환경 세팅
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10' # 가장 안정적인 파이썬 3.10 버전 사용
+        python-version: '3.10'
 
-    - name: 필수 라이브러리 설치 (fdr, pandas, bs4, lxml)
+    - name: 필수 라이브러리 설치
       run: |
         python -m pip install --upgrade pip
-        # ⚠️ 아래 줄을 수정했습니다. pykrx 대신 fdr과 크롤링 도구들을 설치합니다.
-        pip install finance-datareader pandas requests beautifulsoup4 lxml
+        # 사용자의 원칙(이격도, 흑자, 수급) 분석에 필요한 모든 라이브러리 설치
+        pip install finance-datareader pandas requests beautifulsoup4 lxml opendartreader pykrx
 
     - name: 주도주 탐색 파이썬 스크립트 실행
       run: python start2.py
