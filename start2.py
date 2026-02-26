@@ -15,51 +15,47 @@ def send_discord_message(content):
         print(f"메시지 전송 에러: {e}")
 
 def run_analysis():
+    # 현재 시점: 2026-02-26 목요일
     today_str = datetime.now().strftime('%Y-%m-%d %A')
     print(f"--- {today_str} 분석 시작 ---")
     
     try:
-        # 1. KRX 전체 종목 리스트 호출 (가장 최신 규격 반영)
-        df_krx = fdr.StockListing('KRX')
-
-        # 2. 컬럼명 유연하게 대처 (Sector가 없으면 Industry나 다른 이름 확인)
-        target_col = None
-        for col in ['Sector', 'Industry', 'Category', '업종']:
-            if col in df_krx.columns:
-                target_col = col
-                break
+        # 1. 시세 데이터(KRX)와 종목 상세 정보(KRX-DESC)를 각각 가져옴
+        df_list = fdr.StockListing('KRX') # 현재 컬럼: Code, Name, Market 등
+        df_desc = fdr.StockListing('KRX-DESC') # 여기 'Sector' 업종 정보가 있음
         
-        if not target_col:
-            # 컬럼을 못 찾으면 현재 컬럼 목록을 디코로 보내고 종료
-            cols = ", ".join(df_krx.columns)
-            send_discord_message(f"❌ 데이터 구조 오류: 업종 컬럼을 찾을 수 없습니다.\n현재 컬럼: {cols}")
-            return
+        # 2. 'Code'와 'Symbol' 기준으로 두 데이터를 합침 (Merge)
+        # KRX-DESC의 'Symbol' 컬럼이 종목코드임
+        df_krx = pd.merge(df_list, df_desc[['Symbol', 'Sector']], left_on='Code', right_on='Symbol', how='left')
 
         # 3. 업종명에 '반도체'가 포함된 종목 필터링
-        semi_df = df_krx[df_krx[target_col].str.contains('반도체', na=False)].copy()
+        # Sector 컬럼이 존재하므로 이제 에러가 나지 않습니다.
+        semi_df = df_krx[df_krx['Sector'].str.contains('반도체', na=False)].copy()
         
+        if semi_df.empty:
+            send_discord_message(f"ℹ️ {today_str}: 반도체 업종 종목을 찾지 못했습니다. 데이터 형식을 재점검합니다.")
+            return
+            
     except Exception as e:
-        send_discord_message(f"❌ 데이터 로드 실패: {e}")
+        send_discord_message(f"❌ 데이터 로드 및 병합 실패: {e}")
         return
 
     target_list = []
     
-    # 4. 이격도 분석 (상위 50개 종목으로 제한하여 안정성 확보)
+    # 4. 상위 50개 종목 이격도 분석
     for index, row in semi_df.head(50).iterrows():
-        ticker = row['Code'] if 'Code' in row else row['Symbol']
+        ticker = row['Code']
         name = row['Name']
         
         # 시장 구분 (KOSPI/KOSDAQ)에 따른 티커 설정
-        market = row.get('Market', '')
-        suffix = ".KS" if "KOSPI" in market.upper() else ".KQ"
+        market = row.get('MarketId', '')
+        suffix = ".KS" if market == "STK" else ".KQ" # STK=코스피, KSQ=코스닥
         full_ticker = ticker + suffix
         
         try:
-            # 데이터 가져오기
             data = yf.download(full_ticker, period="40d", progress=False)
             if len(data) < 20: continue
 
-            # 이격도 계산
             data['MA20'] = data['Close'].rolling(window=20).mean()
             current_price = float(data['Close'].iloc[-1])
             ma20 = float(data['MA20'].iloc[-1])
