@@ -1,4 +1,4 @@
-name: Semi-Conductor Analysis Bot
+name: sector Analysis Bot
 
 on:
   schedule:
