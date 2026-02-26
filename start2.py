@@ -4,41 +4,53 @@ import pandas as pd
 import requests
 from datetime import datetime
 
-# 사용자님이 제공하신 디스코드 웹후크 URL
+# 사용자님의 디스코드 웹후크 URL
 DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1474739516177911979/IlrMnj_UABCGYJiVg9NcPpSVT2HoT9aMNpTsVyJzCK3yS9LQH9E0WgbYB99FHVS2SUWT'
 
 def send_discord_message(content):
     data = {"content": content}
     try:
-        response = requests.post(DISCORD_WEBHOOK_URL, json=data)
-        return response.status_code
+        requests.post(DISCORD_WEBHOOK_URL, json=data)
     except Exception as e:
         print(f"메시지 전송 에러: {e}")
 
 def run_analysis():
-    # 2026-02-26 목요일 체크
     today_str = datetime.now().strftime('%Y-%m-%d %A')
-    print(f"--- {today_str} 반도체 이격도 분석 시작 ---")
+    print(f"--- {today_str} 분석 시작 ---")
     
     try:
-        # 한국거래소 종목 리스트
-        df_krx = fdr.StockListing('KRX')
-        # 업종명에 '반도체'가 포함된 종목만 추출
+        # 'KRX' 대신 'KOSPI'와 'KOSDAQ'을 각각 불러와서 합치면 Sector 정보가 더 정확합니다.
+        df_kospi = fdr.StockListing('KOSPI')
+        df_kosdaq = fdr.StockListing('KOSDAQ')
+        df_krx = pd.concat([df_kospi, df_kosdaq])
+
+        # 'Sector' 컬럼이 있는지 확인 (에러 방지)
+        if 'Sector' not in df_krx.columns:
+            # 컬럼명이 다를 경우를 대비해 전체 컬럼 출력 (디버깅용)
+            print(f"Available columns: {df_krx.columns}")
+            send_discord_message("❌ 에러: 데이터에 'Sector' 항목이 없습니다. 관리자 확인 필요.")
+            return
+
+        # 업종명에 '반도체'가 포함된 종목 추출
         semi_df = df_krx[df_krx['Sector'].str.contains('반도체', na=False)].copy()
+        
     except Exception as e:
         send_discord_message(f"❌ 데이터 로드 실패: {e}")
         return
 
     target_list = []
     
-    # 시가총액 상위 100개 중 이격도 낮은 것 탐색 (실행 시간 고려)
-    for _, row in semi_df.head(100).iterrows():
+    # 시가총액 상위 종목부터 분석 (너무 많으면 깃허브에서 끊길 수 있어 100개 제한)
+    search_count = 0
+    for _, row in semi_df.iterrows():
+        if search_count >= 100: break
+        
         ticker = row['Symbol']
         name = row['Name']
-        full_ticker = ticker + (".KS" if row['Market'] == 'KOSPI' else ".KQ")
+        # yfinance용 티커 변환
+        full_ticker = ticker + (".KS" if row['Code'] in df_kospi['Symbol'].values else ".KQ")
         
         try:
-            # 최근 40일치 데이터로 20일 이동평균 계산
             data = yf.download(full_ticker, period="40d", progress=False)
             if len(data) < 20: continue
 
@@ -50,10 +62,11 @@ def run_analysis():
             # 사용자 매매 기준: 이격도 90 이하
             if disparity <= 90:
                 target_list.append(f"✅ **{name}** ({ticker})\n   └ 이격도: {disparity:.2f}% | 현재가: {int(current_price):,}원")
+                search_count += 1
         except:
             continue
 
-    # 디스코드 전송
+    # 결과 전송
     if target_list:
         msg = f"📢 **{today_str} 반도체 이격도 90 이하 종목**\n\n" + "\n".join(target_list)
         msg += "\n\n💡 *영업이익 흑자 및 수급(외인/기관)을 꼭 확인하세요!*"
